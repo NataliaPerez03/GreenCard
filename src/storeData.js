@@ -62,7 +62,7 @@ export const products = [
     rating: 4.7,
     reviews: 201,
     badge: 'bestseller',
-    image: 'https://upload.wikimedia.org/wikipedia/commons/b/b3/Spirulina_Powder.jpg',
+    image: 'https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcQrdAM1VEuczHn1MYhq2kIRBgUXW2bEOmUaww&s',
     prices: { USD: 15, COP: 60000, BRL: 75, EUR: 14 },
     name: {
       es: 'Tabletas de Espirulina',
@@ -86,7 +86,7 @@ export const products = [
     rating: 4.9,
     reviews: 315,
     badge: 'premium',
-    image: 'https://upload.wikimedia.org/wikipedia/commons/5/52/Manuka_honey.jpg',
+    image: 'https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcSVHV3pZB19w51bp73hncX7r9zGxkFz0gJAOQ&s',
     prices: { USD: 35, COP: 140000, BRL: 175, EUR: 32 },
     name: {
       es: 'Miel de Manuka Cruda',
