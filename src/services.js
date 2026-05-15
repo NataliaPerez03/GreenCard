@@ -21,6 +21,10 @@ export const STATUS_KEYS = [
   'status_delivered'
 ];
 
+export function calculateOrderTotal(items = []) {
+  return items.reduce((sum, item) => sum + item.price * item.qty, 0);
+}
+
 export const productService = {
   getAll() {
     return products.map((product) => ({
@@ -133,7 +137,7 @@ export const orderService = {
       history: [{ status: ORDER_STATES[0], time: new Date().toISOString() }]
     };
 
-    order.total = cartItems.reduce((sum, item) => sum + item.price * item.qty, 0);
+    order.total = calculateOrderTotal(cartItems);
     orders[id] = order;
 
     eventBus.emit('order:created', order);

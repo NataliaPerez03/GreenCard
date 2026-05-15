@@ -1416,6 +1416,31 @@ button {
   font-weight: 600;
 }
 
+.order-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+  margin-bottom: 32px;
+}
+
+.order-summary-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 18px 20px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: linear-gradient(180deg, rgba(69, 139, 109, 0.08), rgba(255, 255, 255, 0.96));
+}
+
+.order-summary-label {
+  color: var(--text-light);
+  font-size: 0.8rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
 .timeline {
   position: relative;
   display: flex;
@@ -1506,12 +1531,98 @@ button {
   gap: 12px;
 }
 
+.order-item-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.order-item-copy small {
+  color: var(--text-light);
+  font-size: 0.85rem;
+}
+
 .order-item.total {
   margin-top: 8px;
   padding-top: 20px;
   border-top: 1px solid var(--border);
   color: var(--green-900);
   font-size: 1.2rem;
+}
+
+.delivery-history {
+  margin-top: 32px;
+  padding-top: 28px;
+  border-top: 1px solid var(--border);
+}
+
+.delivery-history-header {
+  margin-bottom: 20px;
+}
+
+.delivery-history-header h3,
+.delivery-history-status h3 {
+  margin-bottom: 8px;
+  color: var(--green-900);
+  font-family: var(--font-heading);
+  font-size: 1.35rem;
+}
+
+.delivery-history-header p {
+  color: var(--text-secondary);
+}
+
+.delivery-history-products,
+.delivery-status-list {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.delivery-history-item,
+.delivery-status-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 20px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+}
+
+.delivery-history-main {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.delivery-history-thumb {
+  width: 56px;
+  height: 56px;
+  object-fit: cover;
+  border-radius: 14px;
+}
+
+.delivery-history-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--text-secondary);
+}
+
+.delivery-history-copy strong,
+.delivery-status-item strong {
+  color: var(--green-900);
+}
+
+.delivery-history-copy span,
+.delivery-status-item span {
+  font-size: 0.92rem;
+}
+
+.delivery-history-status {
+  margin-top: 24px;
 }
 
 .newsletter-section {
@@ -1793,6 +1904,20 @@ button {
   .cart-item-image {
     width: 64px;
     height: 64px;
+  }
+
+  .order-summary-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .delivery-history-item,
+  .delivery-status-item {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .delivery-history-main {
+    align-items: flex-start;
   }
 
   .section {

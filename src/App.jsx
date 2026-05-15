@@ -5,7 +5,7 @@ import { countries, paymentIcons, paymentNames } from './storeData.js';
 import { eventBus } from './eventBus.js';
 import { i18n } from './i18n.js';
 import { getProductPrice } from './pricing.js';
-import { orderService, productService, sagaOrchestrator, STATUS_KEYS } from './services.js';
+import { calculateOrderTotal, orderService, productService, sagaOrchestrator, STATUS_KEYS } from './services.js';
 
 const CATEGORY_KEYS = [
   ['all', 'cat_all'],
@@ -19,6 +19,14 @@ const CATEGORY_KEYS = [
 
 const VALID_PAGES = new Set(['home', 'products', 'cart', 'checkout', 'tracking', 'auth']);
 const PROTECTED_PAGES = new Set(['products', 'cart', 'checkout']);
+const STATUS_KEY_BY_CODE = {
+  ORDEN_CREADA: 'status_created',
+  EN_PROCESO: 'status_processing',
+  PREPARANDO: 'status_preparing',
+  ENVIADO: 'status_shipped',
+  EN_CAMINO: 'status_transit',
+  ENTREGADO: 'status_delivered'
+};
 
 function getPageFromHash() {
   const page = window.location.hash.replace('#', '') || 'home';
@@ -52,6 +60,14 @@ function buildSagaMessage(locale, step, status) {
 
 function formatPrice(locale, amount, currency) {
   return i18n.formatCurrency(locale, amount, currency);
+}
+
+function formatDate(locale, value) {
+  return i18n.formatDateTime(locale, value);
+}
+
+function getStatusKey(status) {
+  return STATUS_KEY_BY_CODE[status] || 'status_created';
 }
 
 export default function App() {
@@ -1113,6 +1129,10 @@ function FormField({ label, type = 'text', value, onChange }) {
 function TrackingPage({ t, locale, order, onTrackSearch }) {
   const [query, setQuery] = useState('');
   const orderLocale = order ? getCountry(order.country).locale : locale;
+  const orderTotal = order ? calculateOrderTotal(order.items) : 0;
+  const deliveredEntry = order?.history.find((entry) => entry.status === 'ENTREGADO') || null;
+  const latestEntry = order?.history.at(-1) || null;
+  const isDelivered = order?.status === 'ENTREGADO';
 
   if (!order) {
     return (
@@ -1143,6 +1163,23 @@ function TrackingPage({ t, locale, order, onTrackSearch }) {
           <span className="order-status-badge">{t(STATUS_KEYS[order.statusIndex])}</span>
         </div>
 
+        <div className="order-summary-grid">
+          <div className="order-summary-card">
+            <span className="order-summary-label">{t('track_summary_ordered')}</span>
+            <strong>{formatDate(orderLocale, order.createdAt)}</strong>
+          </div>
+          <div className="order-summary-card">
+            <span className="order-summary-label">
+              {isDelivered ? t('track_summary_delivered') : t('track_summary_updated')}
+            </span>
+            <strong>{formatDate(orderLocale, deliveredEntry?.time || latestEntry?.time || order.createdAt)}</strong>
+          </div>
+          <div className="order-summary-card">
+            <span className="order-summary-label">{t('currency_label')}</span>
+            <strong>{order.currency}</strong>
+          </div>
+        </div>
+
         <div className="timeline">
           {STATUS_KEYS.map((statusKey, index) => (
             <div
@@ -1160,16 +1197,60 @@ function TrackingPage({ t, locale, order, onTrackSearch }) {
             <div key={item.id} className="order-item">
               <span className="order-item-name">
                 <img src={item.image} className="summary-thumb" alt="" />
-                {item.name[orderLocale]} x{item.qty}
+                <span className="order-item-copy">
+                  <strong>{item.name[orderLocale]}</strong>
+                  <small>{t('qty')}: {item.qty}</small>
+                </span>
               </span>
               <span>{formatPrice(orderLocale, item.price * item.qty, order.currency)}</span>
             </div>
           ))}
           <div className="order-item total">
             <strong>{t('cart_total')}</strong>
-            <strong>{formatPrice(orderLocale, order.total, order.currency)}</strong>
+            <strong>{formatPrice(orderLocale, orderTotal, order.currency)}</strong>
           </div>
         </div>
+
+        {isDelivered ? (
+          <div className="delivery-history">
+            <div className="delivery-history-header">
+              <h3>{t('track_history_title')}</h3>
+              <p>{t('track_history_desc')}</p>
+            </div>
+
+            <div className="delivery-history-products">
+              {order.items.map((item) => (
+                <article key={`${item.id}-history`} className="delivery-history-item">
+                  <div className="delivery-history-main">
+                    <img src={item.image} className="delivery-history-thumb" alt="" />
+                    <div className="delivery-history-copy">
+                      <strong>{item.name[orderLocale]}</strong>
+                      <span>{t('qty')}: {item.qty}</span>
+                      <span>{t('track_history_item_ordered')}: {formatDate(orderLocale, order.createdAt)}</span>
+                      <span>
+                        {t('track_history_item_delivered')}:{' '}
+                        {formatDate(orderLocale, deliveredEntry?.time || latestEntry?.time || order.createdAt)}
+                      </span>
+                    </div>
+                  </div>
+                  <strong>{formatPrice(orderLocale, item.price * item.qty, order.currency)}</strong>
+                </article>
+              ))}
+            </div>
+
+            <div className="delivery-history-status">
+              <h3>{t('track_updates_title')}</h3>
+              <div className="delivery-status-list">
+                {order.history.map((entry) => (
+                  <div key={`${entry.status}-${entry.time}`} className="delivery-status-item">
+                    <strong>{t(getStatusKey(entry.status))}</strong>
+                    <span>{formatDate(orderLocale, entry.time)}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        ) : null}
       </div>
     </section>
   );

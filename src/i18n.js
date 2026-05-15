@@ -27,5 +27,20 @@ export const i18n = {
     } catch {
       return `${currency} ${amount.toFixed(2)}`;
     }
+  },
+
+  formatDateTime(locale, value) {
+    if (!value) {
+      return '';
+    }
+
+    try {
+      return new Intl.DateTimeFormat(localeMap[locale] || 'en-US', {
+        dateStyle: 'medium',
+        timeStyle: 'short'
+      }).format(new Date(value));
+    } catch {
+      return String(value);
+    }
   }
 };
