@@ -1,6 +1,6 @@
 import { useDeferredValue, useEffect, useRef, useState } from 'react';
 import AuthPage from './AuthPage.jsx';
-import { getStoredSession, getStoredUsers, sanitizeUser, saveSession, saveUsers } from './auth.js';
+import { getStoredSession, loginUser, registerUser, saveSession } from './auth.js';
 import { countries, paymentIcons, paymentNames } from './storeData.js';
 import { eventBus } from './eventBus.js';
 import { i18n } from './i18n.js';
@@ -72,6 +72,8 @@ function getStatusKey(status) {
 
 export default function App() {
   const [isLoading, setIsLoading] = useState(true);
+  const [catalogLoaded, setCatalogLoaded] = useState(false);
+  const [catalogError, setCatalogError] = useState('');
   const [currentPage, setCurrentPage] = useState(getPageFromHash());
   const [countryCode, setCountryCode] = useState('CO');
   const [cart, setCart] = useState([]);
@@ -79,12 +81,11 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const deferredSearchQuery = useDeferredValue(searchQuery);
   const [menuOpen, setMenuOpen] = useState(false);
-  const [currentOrderId, setCurrentOrderId] = useState(null);
-  const [, setOrderVersion] = useState(0);
+  const [currentOrder, setCurrentOrder] = useState(null);
+  const [, setCatalogVersion] = useState(0);
   const [toasts, setToasts] = useState([]);
   const [authMode, setAuthMode] = useState('login');
   const [authRedirect, setAuthRedirect] = useState('products');
-  const [registeredUsers, setRegisteredUsers] = useState(() => getStoredUsers());
   const [sessionUser, setSessionUser] = useState(() => getStoredSession());
 
   const country = getCountry(countryCode);
@@ -118,12 +119,31 @@ export default function App() {
   }, [sessionUser]);
 
   useEffect(() => {
+    let active = true;
     const unsubscribers = [
-      eventBus.on('order:created', () => setOrderVersion((value) => value + 1)),
-      eventBus.on('order:status_updated', () => setOrderVersion((value) => value + 1))
+      eventBus.on('product:catalog_updated', () => setCatalogVersion((value) => value + 1)),
+      eventBus.on('product:stock_updated', () => setCatalogVersion((value) => value + 1)),
+      eventBus.on('product:stock_restored', () => setCatalogVersion((value) => value + 1))
     ];
 
+    async function loadCatalog() {
+      try {
+        setCatalogError('');
+        await productService.loadAll();
+        if (active) {
+          setCatalogLoaded(true);
+        }
+      } catch (error) {
+        if (active) {
+          setCatalogError(error.message || 'No fue posible cargar el catalogo.');
+        }
+      }
+    }
+
+    loadCatalog();
+
     return () => {
+      active = false;
       unsubscribers.forEach((unsubscribe) => unsubscribe());
     };
   }, []);
@@ -132,6 +152,23 @@ export default function App() {
     setMenuOpen(false);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   }, [currentPage]);
+
+  useEffect(() => {
+    if (!currentOrder?.id || currentPage !== 'tracking' || currentOrder.status === 'ENTREGADO') {
+      return undefined;
+    }
+
+    const interval = window.setInterval(async () => {
+      try {
+        const refreshedOrder = await orderService.getById(currentOrder.id);
+        setCurrentOrder(refreshedOrder);
+      } catch {
+        // Evita romper la UI si el backend falla momentaneamente.
+      }
+    }, 4000);
+
+    return () => window.clearInterval(interval);
+  }, [currentOrder?.id, currentOrder?.status, currentPage]);
 
   const filteredProducts = deferredSearchQuery.trim()
     ? productService.search(deferredSearchQuery, locale)
@@ -159,9 +196,6 @@ export default function App() {
 
   const cartCount = cartItems.reduce((sum, item) => sum + item.qty, 0);
   const cartTotal = cartItems.reduce((sum, item) => sum + item.price * item.qty, 0);
-  const currentOrder = currentOrderId
-    ? orderService.getById(currentOrderId)
-    : orderService.getAll().at(-1) || null;
 
   function navigate(page, options = {}) {
     const nextPage = VALID_PAGES.has(page) ? page : 'home';
@@ -197,7 +231,7 @@ export default function App() {
     return /\S+@\S+\.\S+/.test(value);
   }
 
-  function handleLogin(form) {
+  async function handleLogin(form) {
     const email = form.email.trim().toLowerCase();
     const password = form.password.trim();
 
@@ -206,23 +240,18 @@ export default function App() {
       return;
     }
 
-    const matchedUser = registeredUsers.find(
-      (user) => user.email.toLowerCase() === email && user.password === password
-    );
-
-    if (!matchedUser) {
-      showToast(t('auth_login_error'), 'error');
-      return;
+    try {
+      const safeUser = await loginUser({ email, password });
+      setSessionUser(safeUser);
+      saveSession(safeUser);
+      showToast(t('auth_login_success'), 'success');
+      navigate(authRedirect || 'products', { bypassAuth: true });
+    } catch (error) {
+      showToast(error.message || t('auth_login_error'), 'error');
     }
-
-    const safeUser = sanitizeUser(matchedUser);
-    setSessionUser(safeUser);
-    saveSession(safeUser);
-    showToast(t('auth_login_success'), 'success');
-    navigate(authRedirect || 'products', { bypassAuth: true });
   }
 
-  function handleRegister(form) {
+  async function handleRegister(form) {
     const name = form.name.trim();
     const email = form.email.trim().toLowerCase();
     const password = form.password.trim();
@@ -243,27 +272,15 @@ export default function App() {
       return;
     }
 
-    if (registeredUsers.some((user) => user.email.toLowerCase() === email)) {
-      showToast(t('auth_user_exists'), 'error');
-      return;
+    try {
+      const safeUser = await registerUser({ name, email, password });
+      setSessionUser(safeUser);
+      saveSession(safeUser);
+      showToast(t('auth_register_success'), 'success');
+      navigate(authRedirect || 'products', { bypassAuth: true });
+    } catch (error) {
+      showToast(error.message || t('auth_user_exists'), 'error');
     }
-
-    const nextUser = {
-      id: `USR-${Date.now().toString(36).toUpperCase()}`,
-      name,
-      email,
-      password
-    };
-
-    const nextUsers = [...registeredUsers, nextUser];
-    setRegisteredUsers(nextUsers);
-    saveUsers(nextUsers);
-
-    const safeUser = sanitizeUser(nextUser);
-    setSessionUser(safeUser);
-    saveSession(safeUser);
-    showToast(t('auth_register_success'), 'success');
-    navigate(authRedirect || 'products', { bypassAuth: true });
   }
 
   function handleLogout() {
@@ -277,6 +294,11 @@ export default function App() {
   }
 
   function addToCart(productId, quantity = 1) {
+    if (!catalogLoaded) {
+      showToast(t('loading'), 'info');
+      return false;
+    }
+
     if (!sessionUser) {
       setAuthMode('login');
       setAuthRedirect('products');
@@ -342,20 +364,25 @@ export default function App() {
   }
 
   function handleOrderPlaced(order) {
-    setCurrentOrderId(order.id);
+    setCurrentOrder(order);
     setCart([]);
     showToast(t('pay_success'), 'success');
     navigate('tracking');
   }
 
-  function handleTrackSearch(orderId) {
-    const found = orderService.getById(orderId.trim());
-    if (!found) {
-      showToast('Order not found', 'error');
+  async function handleTrackSearch(orderId) {
+    const normalizedOrderId = orderId.trim();
+    if (!normalizedOrderId) {
+      showToast(t('track_no'), 'error');
       return;
     }
 
-    setCurrentOrderId(found.id);
+    try {
+      const found = await orderService.getById(normalizedOrderId);
+      setCurrentOrder(found);
+    } catch (error) {
+      showToast(error.message || 'Order not found', 'error');
+    }
   }
 
   return (
@@ -391,6 +418,8 @@ export default function App() {
             locale={locale}
             currency={currency}
             featuredProducts={featuredProducts}
+            catalogLoaded={catalogLoaded}
+            catalogError={catalogError}
             isAuthenticated={Boolean(sessionUser)}
             onAddToCart={addToCart}
             onNavigate={navigate}
@@ -403,6 +432,8 @@ export default function App() {
             locale={locale}
             currency={currency}
             products={filteredProducts}
+            catalogLoaded={catalogLoaded}
+            catalogError={catalogError}
             categoryFilter={categoryFilter}
             isAuthenticated={Boolean(sessionUser)}
             searchQuery={searchQuery}
@@ -466,6 +497,7 @@ export default function App() {
             t={t}
             locale={locale}
             order={currentOrder}
+            isRefreshingOrder={Boolean(currentOrder?.id && currentOrder.status !== 'ENTREGADO')}
             onTrackSearch={handleTrackSearch}
           />
         )}
@@ -590,7 +622,17 @@ function Header({
   );
 }
 
-function HomePage({ t, locale, currency, featuredProducts, isAuthenticated, onAddToCart, onNavigate }) {
+function HomePage({
+  t,
+  locale,
+  currency,
+  featuredProducts,
+  catalogLoaded,
+  catalogError,
+  isAuthenticated,
+  onAddToCart,
+  onNavigate
+}) {
   const trustItems = [
     { title: t('trust_organic'), description: t('trust_organic_desc') },
     { title: t('trust_shipping'), description: t('trust_shipping_desc') },
@@ -661,19 +703,23 @@ function HomePage({ t, locale, currency, featuredProducts, isAuthenticated, onAd
             {t('view_all')} →
           </button>
         </div>
-        <div className="product-grid">
-          {featuredProducts.map((product) => (
-            <ProductCard
-              key={product.id}
-              product={product}
-              t={t}
-              locale={locale}
-              currency={currency}
-              isAuthenticated={isAuthenticated}
-              onAddToCart={onAddToCart}
-            />
-          ))}
-        </div>
+        {catalogError ? <p className="empty-state">{catalogError}</p> : null}
+        {!catalogError && !catalogLoaded ? <p className="empty-state">{t('loading')}</p> : null}
+        {catalogLoaded ? (
+          <div className="product-grid">
+            {featuredProducts.map((product) => (
+              <ProductCard
+                key={product.id}
+                product={product}
+                t={t}
+                locale={locale}
+                currency={currency}
+                isAuthenticated={isAuthenticated}
+                onAddToCart={onAddToCart}
+              />
+            ))}
+          </div>
+        ) : null}
       </section>
 
       <section className="newsletter-section">
@@ -694,6 +740,8 @@ function ProductsPage({
   locale,
   currency,
   products,
+  catalogLoaded,
+  catalogError,
   categoryFilter,
   isAuthenticated,
   searchQuery,
@@ -729,7 +777,11 @@ function ProductsPage({
       </div>
 
       <div className="product-grid">
-        {products.length ? (
+        {catalogError ? (
+          <p className="empty-state">{catalogError}</p>
+        ) : !catalogLoaded ? (
+          <p className="empty-state">{t('loading')}</p>
+        ) : products.length ? (
           products.map((product) => (
             <ProductCard
               key={product.id}
@@ -742,7 +794,7 @@ function ProductsPage({
             />
           ))
         ) : (
-          <p className="empty-state">{t('cart_empty')}</p>
+          <p className="empty-state">{t('track_no')}</p>
         )}
       </div>
     </section>
@@ -1126,7 +1178,7 @@ function FormField({ label, type = 'text', value, onChange }) {
   );
 }
 
-function TrackingPage({ t, locale, order, onTrackSearch }) {
+function TrackingPage({ t, locale, order, isRefreshingOrder, onTrackSearch }) {
   const [query, setQuery] = useState('');
   const orderLocale = order ? getCountry(order.country).locale : locale;
   const orderTotal = order ? calculateOrderTotal(order.items) : 0;
@@ -1179,6 +1231,8 @@ function TrackingPage({ t, locale, order, onTrackSearch }) {
             <strong>{order.currency}</strong>
           </div>
         </div>
+
+        {isRefreshingOrder ? <p className="empty-state">{t('loading')}</p> : null}
 
         <div className="timeline">
           {STATUS_KEYS.map((statusKey, index) => (

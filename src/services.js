@@ -1,8 +1,6 @@
-import { products } from './storeData.js';
 import { eventBus } from './eventBus.js';
 
-const stockOverrides = {};
-const orders = {};
+const API_BASE_URL = (import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000').replace(/\/+$/, '');
 const ORDER_STATES = [
   'ORDEN_CREADA',
   'EN_PROCESO',
@@ -11,6 +9,8 @@ const ORDER_STATES = [
   'EN_CAMINO',
   'ENTREGADO'
 ];
+
+let productsCache = [];
 
 export const STATUS_KEYS = [
   'status_created',
@@ -25,24 +25,52 @@ export function calculateOrderTotal(items = []) {
   return items.reduce((sum, item) => sum + item.price * item.qty, 0);
 }
 
+async function apiRequest(path, options = {}) {
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    headers: {
+      'Content-Type': 'application/json',
+      ...(options.headers || {})
+    },
+    ...options
+  });
+
+  const isJson = response.headers.get('content-type')?.includes('application/json');
+  const payload = isJson ? await response.json() : null;
+
+  if (!response.ok) {
+    const error = new Error(payload?.detail || `Request failed with status ${response.status}`);
+    error.status = response.status;
+    throw error;
+  }
+
+  return payload;
+}
+
+function updateProductCache(product) {
+  const index = productsCache.findIndex((item) => item.id === product.id);
+  if (index === -1) {
+    productsCache = [...productsCache, product];
+    return;
+  }
+
+  productsCache = productsCache.map((item) => (item.id === product.id ? product : item));
+}
+
 export const productService = {
+  async loadAll() {
+    const payload = await apiRequest('/api/products');
+    productsCache = Array.isArray(payload.products) ? payload.products : [];
+    eventBus.emit('product:catalog_updated', this.getAll());
+    return this.getAll();
+  },
+
   getAll() {
-    return products.map((product) => ({
-      ...product,
-      stock: stockOverrides[product.id] ?? product.stock
-    }));
+    return productsCache.map((product) => ({ ...product }));
   },
 
   getById(id) {
-    const product = products.find((item) => item.id === id);
-    if (!product) {
-      return null;
-    }
-
-    return {
-      ...product,
-      stock: stockOverrides[product.id] ?? product.stock
-    };
+    const product = productsCache.find((item) => item.id === id);
+    return product ? { ...product } : null;
   },
 
   search(query, locale) {
@@ -53,8 +81,8 @@ export const productService = {
 
     return this.getAll().filter(
       (product) =>
-        product.name[locale]?.toLowerCase().includes(normalized) ||
-        product.desc[locale]?.toLowerCase().includes(normalized)
+        product.name?.[locale]?.toLowerCase()?.includes(normalized) ||
+        product.desc?.[locale]?.toLowerCase()?.includes(normalized)
     );
   },
 
@@ -66,25 +94,34 @@ export const productService = {
     return this.getAll().filter((product) => product.category === category);
   },
 
-  reserveStock(id, quantity) {
-    const product = this.getById(id);
-    if (!product || product.stock < quantity) {
-      return false;
-    }
+  async reserveStock(id, quantity) {
+    try {
+      const product = await apiRequest(`/api/products/${id}/reserve`, {
+        method: 'POST',
+        body: JSON.stringify({ quantity })
+      });
 
-    stockOverrides[id] = product.stock - quantity;
-    eventBus.emit('product:stock_updated', { id, stock: stockOverrides[id] });
-    return true;
+      updateProductCache(product);
+      eventBus.emit('product:stock_updated', product);
+      return { success: true, product };
+    } catch (error) {
+      if (error.status === 404 || error.status === 409) {
+        return { success: false, error: error.message };
+      }
+
+      throw error;
+    }
   },
 
-  restoreStock(id, quantity) {
-    const baseProduct = products.find((item) => item.id === id);
-    if (!baseProduct) {
-      return;
-    }
+  async restoreStock(id, quantity) {
+    const product = await apiRequest(`/api/products/${id}/restore`, {
+      method: 'POST',
+      body: JSON.stringify({ quantity })
+    });
 
-    stockOverrides[id] = (stockOverrides[id] ?? baseProduct.stock) + quantity;
-    eventBus.emit('product:stock_restored', { id, stock: stockOverrides[id] });
+    updateProductCache(product);
+    eventBus.emit('product:stock_restored', product);
+    return product;
   }
 };
 
@@ -122,61 +159,29 @@ export const paymentService = {
 };
 
 export const orderService = {
-  create(cartItems, shippingInfo, paymentInfo, country, currency) {
-    const id = `ORD-${Date.now().toString(36).toUpperCase()}`;
-    const order = {
-      id,
-      items: [...cartItems],
-      shippingInfo,
-      paymentInfo,
-      country,
-      currency,
-      status: ORDER_STATES[0],
-      statusIndex: 0,
-      createdAt: new Date().toISOString(),
-      history: [{ status: ORDER_STATES[0], time: new Date().toISOString() }]
-    };
-
-    order.total = calculateOrderTotal(cartItems);
-    orders[id] = order;
+  async create(cartItems, shippingInfo, paymentInfo, country, currency) {
+    const order = await apiRequest('/api/orders', {
+      method: 'POST',
+      body: JSON.stringify({
+        items: cartItems,
+        shippingInfo,
+        paymentInfo,
+        country,
+        currency
+      })
+    });
 
     eventBus.emit('order:created', order);
-    this.autoAdvance(id);
-
     return order;
   },
 
-  getById(id) {
-    return orders[id] || null;
+  async getById(id) {
+    return apiRequest(`/api/orders/${id}`);
   },
 
-  getAll() {
-    return Object.values(orders);
-  },
-
-  updateStatus(id, status) {
-    const order = orders[id];
-    if (!order) {
-      return;
-    }
-
-    order.status = status;
-    order.statusIndex = ORDER_STATES.indexOf(status);
-    order.history.push({ status, time: new Date().toISOString() });
-    eventBus.emit('order:status_updated', order);
-  },
-
-  autoAdvance(id) {
-    let currentIndex = 1;
-    const interval = setInterval(() => {
-      if (currentIndex >= ORDER_STATES.length) {
-        clearInterval(interval);
-        return;
-      }
-
-      this.updateStatus(id, ORDER_STATES[currentIndex]);
-      currentIndex += 1;
-    }, 4000);
+  async getAll() {
+    const payload = await apiRequest('/api/orders');
+    return Array.isArray(payload.orders) ? payload.orders : [];
   }
 };
 
@@ -187,8 +192,9 @@ export const sagaOrchestrator = {
     try {
       eventBus.emit('saga:step', { step: 'reserve_stock', status: 'running' });
       for (const item of cart) {
-        if (!productService.reserveStock(item.id, item.qty)) {
-          throw new Error(`stock_insufficient:${item.id}`);
+        const reservation = await productService.reserveStock(item.id, item.qty);
+        if (!reservation.success) {
+          throw new Error(reservation.error || `stock_insufficient:${item.id}`);
         }
 
         completedSteps.push({ type: 'stock', id: item.id, qty: item.qty });
@@ -212,7 +218,7 @@ export const sagaOrchestrator = {
       eventBus.emit('saga:step', { step: 'process_payment', status: 'done' });
 
       eventBus.emit('saga:step', { step: 'create_order', status: 'running' });
-      const order = orderService.create(
+      const order = await orderService.create(
         cart,
         shippingInfo,
         { ...paymentData, txId: payment.txId },
@@ -228,7 +234,7 @@ export const sagaOrchestrator = {
 
       for (const step of completedSteps.reverse()) {
         if (step.type === 'stock') {
-          productService.restoreStock(step.id, step.qty);
+          await productService.restoreStock(step.id, step.qty);
         }
 
         if (step.type === 'payment') {
@@ -241,6 +247,10 @@ export const sagaOrchestrator = {
     }
   }
 };
+
+export function isOrderDelivered(order) {
+  return order?.status === ORDER_STATES.at(-1);
+}
 
 function delay(ms) {
   return new Promise((resolve) => {

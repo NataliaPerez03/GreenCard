@@ -1,5 +1,5 @@
-const USERS_STORAGE_KEY = 'greencart-users';
 const SESSION_STORAGE_KEY = 'greencart-session';
+const API_BASE_URL = (import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000').replace(/\/+$/, '');
 
 function readStorage(key, fallback) {
   if (typeof window === 'undefined') {
@@ -22,18 +22,28 @@ function writeStorage(key, value) {
   window.localStorage.setItem(key, JSON.stringify(value));
 }
 
-export function getStoredUsers() {
-  const users = readStorage(USERS_STORAGE_KEY, []);
-  return Array.isArray(users) ? users : [];
+async function apiRequest(path, payload) {
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(payload)
+  });
+
+  const data = await response.json();
+  if (!response.ok) {
+    const error = new Error(data?.detail || `Request failed with status ${response.status}`);
+    error.status = response.status;
+    throw error;
+  }
+
+  return data;
 }
 
 export function getStoredSession() {
   const session = readStorage(SESSION_STORAGE_KEY, null);
   return session && typeof session === 'object' ? session : null;
-}
-
-export function saveUsers(users) {
-  writeStorage(USERS_STORAGE_KEY, users);
 }
 
 export function saveSession(user) {
@@ -55,4 +65,14 @@ export function sanitizeUser(user) {
     name: user.name,
     email: user.email
   };
+}
+
+export async function loginUser(credentials) {
+  const data = await apiRequest('/api/auth/login', credentials);
+  return sanitizeUser(data.user);
+}
+
+export async function registerUser(payload) {
+  const data = await apiRequest('/api/auth/register', payload);
+  return sanitizeUser(data.user);
 }
