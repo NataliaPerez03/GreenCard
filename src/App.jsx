@@ -1,9 +1,11 @@
 import { useDeferredValue, useEffect, useRef, useState } from 'react';
+import AuthPage from './AuthPage.jsx';
+import { getStoredSession, loginUser, registerUser, saveSession } from './auth.js';
 import { countries, paymentIcons, paymentNames } from './storeData.js';
 import { eventBus } from './eventBus.js';
 import { i18n } from './i18n.js';
 import { getProductPrice } from './pricing.js';
-import { orderService, productService, sagaOrchestrator, STATUS_KEYS } from './services.js';
+import { calculateOrderTotal, orderService, productService, sagaOrchestrator, STATUS_KEYS } from './services.js';
 
 const CATEGORY_KEYS = [
   ['all', 'cat_all'],
@@ -15,7 +17,16 @@ const CATEGORY_KEYS = [
   ['care', 'cat_care']
 ];
 
-const VALID_PAGES = new Set(['home', 'products', 'cart', 'checkout', 'tracking']);
+const VALID_PAGES = new Set(['home', 'products', 'cart', 'checkout', 'tracking', 'auth']);
+const PROTECTED_PAGES = new Set(['products', 'cart', 'checkout']);
+const STATUS_KEY_BY_CODE = {
+  ORDEN_CREADA: 'status_created',
+  EN_PROCESO: 'status_processing',
+  PREPARANDO: 'status_preparing',
+  ENVIADO: 'status_shipped',
+  EN_CAMINO: 'status_transit',
+  ENTREGADO: 'status_delivered'
+};
 
 function getPageFromHash() {
   const page = window.location.hash.replace('#', '') || 'home';
@@ -51,8 +62,18 @@ function formatPrice(locale, amount, currency) {
   return i18n.formatCurrency(locale, amount, currency);
 }
 
+function formatDate(locale, value) {
+  return i18n.formatDateTime(locale, value);
+}
+
+function getStatusKey(status) {
+  return STATUS_KEY_BY_CODE[status] || 'status_created';
+}
+
 export default function App() {
   const [isLoading, setIsLoading] = useState(true);
+  const [catalogLoaded, setCatalogLoaded] = useState(false);
+  const [catalogError, setCatalogError] = useState('');
   const [currentPage, setCurrentPage] = useState(getPageFromHash());
   const [countryCode, setCountryCode] = useState('CO');
   const [cart, setCart] = useState([]);
@@ -60,9 +81,12 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const deferredSearchQuery = useDeferredValue(searchQuery);
   const [menuOpen, setMenuOpen] = useState(false);
-  const [currentOrderId, setCurrentOrderId] = useState(null);
-  const [, setOrderVersion] = useState(0);
+  const [currentOrder, setCurrentOrder] = useState(null);
+  const [, setCatalogVersion] = useState(0);
   const [toasts, setToasts] = useState([]);
+  const [authMode, setAuthMode] = useState('login');
+  const [authRedirect, setAuthRedirect] = useState('products');
+  const [sessionUser, setSessionUser] = useState(() => getStoredSession());
 
   const country = getCountry(countryCode);
   const locale = country.locale;
@@ -75,18 +99,51 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    const syncPage = () => setCurrentPage(getPageFromHash());
+    const syncPage = () => {
+      const nextPage = getPageFromHash();
+      const hasActiveSession = Boolean(sessionUser || getStoredSession());
+      if (PROTECTED_PAGES.has(nextPage) && !hasActiveSession) {
+        setAuthMode('login');
+        setAuthRedirect(nextPage);
+        setCurrentPage('auth');
+        window.location.hash = 'auth';
+        return;
+      }
+
+      setCurrentPage(nextPage);
+    };
+
+    syncPage();
     window.addEventListener('hashchange', syncPage);
     return () => window.removeEventListener('hashchange', syncPage);
-  }, []);
+  }, [sessionUser]);
 
   useEffect(() => {
+    let active = true;
     const unsubscribers = [
-      eventBus.on('order:created', () => setOrderVersion((value) => value + 1)),
-      eventBus.on('order:status_updated', () => setOrderVersion((value) => value + 1))
+      eventBus.on('product:catalog_updated', () => setCatalogVersion((value) => value + 1)),
+      eventBus.on('product:stock_updated', () => setCatalogVersion((value) => value + 1)),
+      eventBus.on('product:stock_restored', () => setCatalogVersion((value) => value + 1))
     ];
 
+    async function loadCatalog() {
+      try {
+        setCatalogError('');
+        await productService.loadAll();
+        if (active) {
+          setCatalogLoaded(true);
+        }
+      } catch (error) {
+        if (active) {
+          setCatalogError(error.message || 'No fue posible cargar el catalogo.');
+        }
+      }
+    }
+
+    loadCatalog();
+
     return () => {
+      active = false;
       unsubscribers.forEach((unsubscribe) => unsubscribe());
     };
   }, []);
@@ -95,6 +152,23 @@ export default function App() {
     setMenuOpen(false);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   }, [currentPage]);
+
+  useEffect(() => {
+    if (!currentOrder?.id || currentPage !== 'tracking' || currentOrder.status === 'ENTREGADO') {
+      return undefined;
+    }
+
+    const interval = window.setInterval(async () => {
+      try {
+        const refreshedOrder = await orderService.getById(currentOrder.id);
+        setCurrentOrder(refreshedOrder);
+      } catch {
+        // Evita romper la UI si el backend falla momentaneamente.
+      }
+    }, 4000);
+
+    return () => window.clearInterval(interval);
+  }, [currentOrder?.id, currentOrder?.status, currentPage]);
 
   const filteredProducts = deferredSearchQuery.trim()
     ? productService.search(deferredSearchQuery, locale)
@@ -122,14 +196,26 @@ export default function App() {
 
   const cartCount = cartItems.reduce((sum, item) => sum + item.qty, 0);
   const cartTotal = cartItems.reduce((sum, item) => sum + item.price * item.qty, 0);
-  const currentOrder = currentOrderId
-    ? orderService.getById(currentOrderId)
-    : orderService.getAll().at(-1) || null;
 
-  function navigate(page) {
+  function navigate(page, options = {}) {
     const nextPage = VALID_PAGES.has(page) ? page : 'home';
+    if (PROTECTED_PAGES.has(nextPage) && !sessionUser && !options.bypassAuth) {
+      setAuthMode('login');
+      setAuthRedirect(nextPage);
+      setCurrentPage('auth');
+      window.location.hash = 'auth';
+      showToast(t('auth_required'), 'info');
+      return;
+    }
+
     setCurrentPage(nextPage);
     window.location.hash = nextPage;
+  }
+
+  function openAuth(mode = 'login', nextPage = 'products') {
+    setAuthMode(mode);
+    setAuthRedirect(nextPage);
+    navigate('auth', { bypassAuth: true });
   }
 
   function showToast(message, type = 'info') {
@@ -141,31 +227,116 @@ export default function App() {
     }, 3000);
   }
 
-  function addToCart(productId, quantity = 1) {
-    const product = productService.getById(productId);
-    if (!product || product.stock <= 0) {
-      showToast(t('stock_out'), 'error');
+  function isValidEmail(value) {
+    return /\S+@\S+\.\S+/.test(value);
+  }
+
+  async function handleLogin(form) {
+    const email = form.email.trim().toLowerCase();
+    const password = form.password.trim();
+
+    if (!isValidEmail(email)) {
+      showToast(t('auth_invalid_email'), 'error');
       return;
     }
 
-    setCart((currentCart) => {
-      const existing = currentCart.find((item) => item.id === productId);
-      if (!existing) {
-        return [...currentCart, { id: productId, qty: Math.min(quantity, product.stock) }];
-      }
+    try {
+      const safeUser = await loginUser({ email, password });
+      setSessionUser(safeUser);
+      saveSession(safeUser);
+      showToast(t('auth_login_success'), 'success');
+      navigate(authRedirect || 'products', { bypassAuth: true });
+    } catch (error) {
+      showToast(error.message || t('auth_login_error'), 'error');
+    }
+  }
 
-      const nextQuantity = Math.min(existing.qty + quantity, product.stock);
-      if (nextQuantity === existing.qty) {
-        showToast(`${t('stock_low')} (${product.stock})`, 'error');
-        return currentCart;
-      }
+  async function handleRegister(form) {
+    const name = form.name.trim();
+    const email = form.email.trim().toLowerCase();
+    const password = form.password.trim();
+    const confirmPassword = form.confirmPassword.trim();
 
-      return currentCart.map((item) =>
+    if (!name || !isValidEmail(email)) {
+      showToast(t('auth_invalid_data'), 'error');
+      return;
+    }
+
+    if (password.length < 6) {
+      showToast(t('auth_password_short'), 'error');
+      return;
+    }
+
+    if (password !== confirmPassword) {
+      showToast(t('auth_password_mismatch'), 'error');
+      return;
+    }
+
+    try {
+      const safeUser = await registerUser({ name, email, password });
+      setSessionUser(safeUser);
+      saveSession(safeUser);
+      showToast(t('auth_register_success'), 'success');
+      navigate(authRedirect || 'products', { bypassAuth: true });
+    } catch (error) {
+      showToast(error.message || t('auth_user_exists'), 'error');
+    }
+  }
+
+  function handleLogout() {
+    setSessionUser(null);
+    saveSession(null);
+    showToast(t('auth_logout_success'), 'info');
+
+    if (PROTECTED_PAGES.has(currentPage)) {
+      navigate('home', { bypassAuth: true });
+    }
+  }
+
+  function addToCart(productId, quantity = 1) {
+    if (!catalogLoaded) {
+      showToast(t('loading'), 'info');
+      return false;
+    }
+
+    if (!sessionUser) {
+      setAuthMode('login');
+      setAuthRedirect('products');
+      navigate('auth', { bypassAuth: true });
+      showToast(t('auth_required'), 'info');
+      return false;
+    }
+
+    const product = productService.getById(productId);
+    if (!product || product.stock <= 0) {
+      showToast(t('stock_out'), 'error');
+      return false;
+    }
+
+    const existing = cart.find((item) => item.id === productId);
+    if (!existing) {
+      setCart((currentCart) => [
+        ...currentCart,
+        { id: productId, qty: Math.min(quantity, product.stock) }
+      ]);
+      showToast(t('added'), 'success');
+      return true;
+    }
+
+    const nextQuantity = Math.min(existing.qty + quantity, product.stock);
+    if (nextQuantity === existing.qty) {
+      showToast(`${t('stock_low')} (${product.stock})`, 'error');
+      return false;
+    }
+
+    setCart((currentCart) =>
+      currentCart.map((item) =>
         item.id === productId ? { ...item, qty: nextQuantity } : item
-      );
-    });
+      )
+    );
 
     showToast(t('added'), 'success');
+    return true;
   }
 
   function removeFromCart(productId) {
@@ -193,20 +364,25 @@ export default function App() {
   }
 
   function handleOrderPlaced(order) {
-    setCurrentOrderId(order.id);
+    setCurrentOrder(order);
     setCart([]);
     showToast(t('pay_success'), 'success');
     navigate('tracking');
   }
 
-  function handleTrackSearch(orderId) {
-    const found = orderService.getById(orderId.trim());
-    if (!found) {
-      showToast('Order not found', 'error');
+  async function handleTrackSearch(orderId) {
+    const normalizedOrderId = orderId.trim();
+    if (!normalizedOrderId) {
+      showToast(t('track_no'), 'error');
       return;
     }
 
-    setCurrentOrderId(found.id);
+    try {
+      const found = await orderService.getById(normalizedOrderId);
+      setCurrentOrder(found);
+    } catch (error) {
+      showToast(error.message || 'Order not found', 'error');
+    }
   }
 
   return (
@@ -224,9 +400,13 @@ export default function App() {
           countryCode={countryCode}
           cartCount={cartCount}
           currentPage={currentPage}
+          isAuthenticated={Boolean(sessionUser)}
           menuOpen={menuOpen}
+          userName={sessionUser?.name || ''}
           onCountryChange={handleCountryChange}
           onNavigate={navigate}
+          onOpenAuth={openAuth}
+          onLogout={handleLogout}
           onToggleMenu={() => setMenuOpen((open) => !open)}
         />
       </header>
@@ -238,6 +418,9 @@ export default function App() {
             locale={locale}
             currency={currency}
             featuredProducts={featuredProducts}
+            catalogLoaded={catalogLoaded}
+            catalogError={catalogError}
+            isAuthenticated={Boolean(sessionUser)}
             onAddToCart={addToCart}
             onNavigate={navigate}
           />
@@ -249,7 +432,10 @@ export default function App() {
             locale={locale}
             currency={currency}
             products={filteredProducts}
+            catalogLoaded={catalogLoaded}
+            catalogError={catalogError}
             categoryFilter={categoryFilter}
+            isAuthenticated={Boolean(sessionUser)}
             searchQuery={searchQuery}
             onCategoryChange={(category) => {
               setCategoryFilter(category);
@@ -262,6 +448,19 @@ export default function App() {
               }
             }}
             onAddToCart={addToCart}
+          />
+        )}
+
+        {currentPage === 'auth' && (
+          <AuthPage
+            t={t}
+            user={sessionUser}
+            mode={authMode}
+            redirectPage={authRedirect}
+            onModeChange={setAuthMode}
+            onLogin={handleLogin}
+            onRegister={handleRegister}
+            onNavigate={navigate}
           />
         )}
 
@@ -286,6 +485,7 @@ export default function App() {
             currency={currency}
             items={cartItems}
             total={cartTotal}
+            user={sessionUser}
             onNavigate={navigate}
             onOrderPlaced={handleOrderPlaced}
             onToast={showToast}
@@ -297,6 +497,7 @@ export default function App() {
             t={t}
             locale={locale}
             order={currentOrder}
+            isRefreshingOrder={Boolean(currentOrder?.id && currentOrder.status !== 'ENTREGADO')}
             onTrackSearch={handleTrackSearch}
           />
         )}
@@ -314,9 +515,13 @@ function Header({
   countryCode,
   cartCount,
   currentPage,
+  isAuthenticated,
   menuOpen,
+  userName,
   onCountryChange,
   onNavigate,
+  onOpenAuth,
+  onLogout,
   onToggleMenu
 }) {
   const navItems = [
@@ -370,6 +575,32 @@ function Header({
           ))}
         </select>
 
+        {isAuthenticated ? (
+          <>
+            <div className="user-pill">{userName}</div>
+            <button className="btn btn-outline nav-auth-btn" type="button" onClick={onLogout}>
+              {t('nav_logout')}
+            </button>
+          </>
+        ) : (
+          <>
+            <button
+              className="btn btn-outline nav-auth-btn"
+              type="button"
+              onClick={() => onOpenAuth('login', 'products')}
+            >
+              {t('nav_login')}
+            </button>
+            <button
+              className="btn btn-primary nav-auth-btn"
+              type="button"
+              onClick={() => onOpenAuth('register', 'products')}
+            >
+              {t('nav_register')}
+            </button>
+          </>
+        )}
+
         <a
           href="#cart"
           className="cart-icon-btn"
@@ -391,7 +622,17 @@ function Header({
   );
 }
 
-function HomePage({ t, locale, currency, featuredProducts, onAddToCart, onNavigate }) {
+function HomePage({
+  t,
+  locale,
+  currency,
+  featuredProducts,
+  catalogLoaded,
+  catalogError,
+  isAuthenticated,
+  onAddToCart,
+  onNavigate
+}) {
   const trustItems = [
     { title: t('trust_organic'), description: t('trust_organic_desc') },
     { title: t('trust_shipping'), description: t('trust_shipping_desc') },
@@ -462,18 +703,23 @@ function HomePage({ t, locale, currency, featuredProducts, onAddToCart, onNaviga
             {t('view_all')} →
           </button>
         </div>
-        <div className="product-grid">
-          {featuredProducts.map((product) => (
-            <ProductCard
-              key={product.id}
-              product={product}
-              t={t}
-              locale={locale}
-              currency={currency}
-              onAddToCart={onAddToCart}
-            />
-          ))}
-        </div>
+        {catalogError ? <p className="empty-state">{catalogError}</p> : null}
+        {!catalogError && !catalogLoaded ? <p className="empty-state">{t('loading')}</p> : null}
+        {catalogLoaded ? (
+          <div className="product-grid">
+            {featuredProducts.map((product) => (
+              <ProductCard
+                key={product.id}
+                product={product}
+                t={t}
+                locale={locale}
+                currency={currency}
+                isAuthenticated={isAuthenticated}
+                onAddToCart={onAddToCart}
+              />
+            ))}
+          </div>
+        ) : null}
       </section>
 
       <section className="newsletter-section">
@@ -494,7 +740,10 @@ function ProductsPage({
   locale,
   currency,
   products,
+  catalogLoaded,
+  catalogError,
   categoryFilter,
+  isAuthenticated,
   searchQuery,
   onCategoryChange,
   onSearchChange,
@@ -528,7 +777,11 @@ function ProductsPage({
       </div>
 
       <div className="product-grid">
-        {products.length ? (
+        {catalogError ? (
+          <p className="empty-state">{catalogError}</p>
+        ) : !catalogLoaded ? (
+          <p className="empty-state">{t('loading')}</p>
+        ) : products.length ? (
           products.map((product) => (
             <ProductCard
               key={product.id}
@@ -536,18 +789,19 @@ function ProductsPage({
               t={t}
               locale={locale}
               currency={currency}
+              isAuthenticated={isAuthenticated}
               onAddToCart={onAddToCart}
             />
           ))
         ) : (
-          <p className="empty-state">{t('cart_empty')}</p>
+          <p className="empty-state">{t('track_no')}</p>
         )}
       </div>
     </section>
   );
 }
 
-function ProductCard({ product, t, locale, currency, onAddToCart }) {
+function ProductCard({ product, t, locale, currency, isAuthenticated, onAddToCart }) {
   const [didAdd, setDidAdd] = useState(false);
   const timeoutRef = useRef(null);
 
@@ -562,7 +816,11 @@ function ProductCard({ product, t, locale, currency, onAddToCart }) {
   const lowStock = product.stock > 0 && product.stock <= 5;
 
   function handleAdd() {
-    onAddToCart(product.id);
+    const added = onAddToCart(product.id);
+    if (!added) {
+      return;
+    }
+
     setDidAdd(true);
 
     if (timeoutRef.current) {
@@ -607,7 +865,7 @@ function ProductCard({ product, t, locale, currency, onAddToCart }) {
             disabled={product.stock === 0}
             onClick={handleAdd}
           >
-            {didAdd ? t('added') : t('add_cart')}
+            {didAdd ? t('added') : isAuthenticated ? t('add_cart') : t('auth_buy_cta')}
           </button>
         </div>
       </div>
@@ -680,11 +938,11 @@ function CartPage({ t, locale, currency, items, total, onNavigate, onRemove, onU
   );
 }
 
-function CheckoutPage({ t, locale, country, currency, items, total, onNavigate, onOrderPlaced, onToast }) {
+function CheckoutPage({ t, locale, country, currency, items, total, user, onNavigate, onOrderPlaced, onToast }) {
   const [step, setStep] = useState(1);
   const [shipping, setShipping] = useState({
-    name: '',
-    email: '',
+    name: user?.name || '',
+    email: user?.email || '',
     address: '',
     city: '',
     phone: ''
@@ -920,9 +1178,13 @@ function FormField({ label, type = 'text', value, onChange }) {
   );
 }
 
-function TrackingPage({ t, locale, order, onTrackSearch }) {
+function TrackingPage({ t, locale, order, isRefreshingOrder, onTrackSearch }) {
   const [query, setQuery] = useState('');
   const orderLocale = order ? getCountry(order.country).locale : locale;
+  const orderTotal = order ? calculateOrderTotal(order.items) : 0;
+  const deliveredEntry = order?.history.find((entry) => entry.status === 'ENTREGADO') || null;
+  const latestEntry = order?.history.at(-1) || null;
+  const isDelivered = order?.status === 'ENTREGADO';
 
   if (!order) {
     return (
@@ -953,6 +1215,25 @@ function TrackingPage({ t, locale, order, onTrackSearch }) {
           <span className="order-status-badge">{t(STATUS_KEYS[order.statusIndex])}</span>
         </div>
 
+        <div className="order-summary-grid">
+          <div className="order-summary-card">
+            <span className="order-summary-label">{t('track_summary_ordered')}</span>
+            <strong>{formatDate(orderLocale, order.createdAt)}</strong>
+          </div>
+          <div className="order-summary-card">
+            <span className="order-summary-label">
+              {isDelivered ? t('track_summary_delivered') : t('track_summary_updated')}
+            </span>
+            <strong>{formatDate(orderLocale, deliveredEntry?.time || latestEntry?.time || order.createdAt)}</strong>
+          </div>
+          <div className="order-summary-card">
+            <span className="order-summary-label">{t('currency_label')}</span>
+            <strong>{order.currency}</strong>
+          </div>
+        </div>
+
+        {isRefreshingOrder ? <p className="empty-state">{t('loading')}</p> : null}
+
         <div className="timeline">
           {STATUS_KEYS.map((statusKey, index) => (
             <div
@@ -970,16 +1251,60 @@ function TrackingPage({ t, locale, order, onTrackSearch }) {
             <div key={item.id} className="order-item">
               <span className="order-item-name">
                 <img src={item.image} className="summary-thumb" alt="" />
-                {item.name[orderLocale]} x{item.qty}
+                <span className="order-item-copy">
+                  <strong>{item.name[orderLocale]}</strong>
+                  <small>{t('qty')}: {item.qty}</small>
+                </span>
               </span>
               <span>{formatPrice(orderLocale, item.price * item.qty, order.currency)}</span>
             </div>
           ))}
           <div className="order-item total">
             <strong>{t('cart_total')}</strong>
-            <strong>{formatPrice(orderLocale, order.total, order.currency)}</strong>
+            <strong>{formatPrice(orderLocale, orderTotal, order.currency)}</strong>
           </div>
         </div>
+
+        {isDelivered ? (
+          <div className="delivery-history">
+            <div className="delivery-history-header">
+              <h3>{t('track_history_title')}</h3>
+              <p>{t('track_history_desc')}</p>
+            </div>
+
+            <div className="delivery-history-products">
+              {order.items.map((item) => (
+                <article key={`${item.id}-history`} className="delivery-history-item">
+                  <div className="delivery-history-main">
+                    <img src={item.image} className="delivery-history-thumb" alt="" />
+                    <div className="delivery-history-copy">
+                      <strong>{item.name[orderLocale]}</strong>
+                      <span>{t('qty')}: {item.qty}</span>
+                      <span>{t('track_history_item_ordered')}: {formatDate(orderLocale, order.createdAt)}</span>
+                      <span>
+                        {t('track_history_item_delivered')}:{' '}
+                        {formatDate(orderLocale, deliveredEntry?.time || latestEntry?.time || order.createdAt)}
+                      </span>
+                    </div>
+                  </div>
+                  <strong>{formatPrice(orderLocale, item.price * item.qty, order.currency)}</strong>
+                </article>
+              ))}
+            </div>
+
+            <div className="delivery-history-status">
+              <h3>{t('track_updates_title')}</h3>
+              <div className="delivery-status-list">
+                {order.history.map((entry) => (
+                  <div key={`${entry.status}-${entry.time}`} className="delivery-status-item">
+                    <strong>{t(getStatusKey(entry.status))}</strong>
+                    <span>{formatDate(orderLocale, entry.time)}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        ) : null}
       </div>
     </section>
   );
