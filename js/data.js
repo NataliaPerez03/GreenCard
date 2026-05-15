@@ -25,14 +25,14 @@ export const products = [
   },
   {
     id:'p3', category:'superfoods', stock:8, rating:4.7, reviews:201, badge:'bestseller',
-    image:'https://upload.wikimedia.org/wikipedia/commons/b/b3/Spirulina_Powder.jpg',
+    image:'https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcQrdAM1VEuczHn1MYhq2kIRBgUXW2bEOmUaww&s',
     prices:{ USD:15.00, COP:60000, BRL:75.00, EUR:14.00 },
     name:{ es:'Tabletas de Espirulina', pt:'Comprimidos de Espirulina', en:'Spirulina Tablets', fr:'Comprimés de Spiruline', de:'Spirulina-Tabletten' },
     desc:{ es:'Superalimento rico en proteínas. 120 tabletas.', pt:'Superalimento rico em proteínas. 120 comprimidos.', en:'Protein-rich superfood. 120 tablets.', fr:'Superaliment riche en protéines. 120 comprimés.', de:'Proteinreiches Superfood. 120 Tabletten.' }
   },
   {
     id:'p4', category:'superfoods', stock:3, rating:4.9, reviews:315, badge:'premium',
-    image:'https://upload.wikimedia.org/wikipedia/commons/5/52/Manuka_honey.jpg',
+    image:'https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcSVHV3pZB19w51bp73hncX7r9zGxkFz0gJAOQ&s',
     prices:{ USD:35.00, COP:140000, BRL:175.00, EUR:32.00 },
     name:{ es:'Miel de Manuka Cruda', pt:'Mel de Manuka Cru', en:'Raw Manuka Honey', fr:'Miel de Manuka Cru', de:'Roher Manuka-Honig' },
     desc:{ es:'Miel premium antibacteriana MGO 400+. 250g.', pt:'Mel premium antibacteriano MGO 400+. 250g.', en:'Premium antibacterial honey MGO 400+. 250g.', fr:'Miel premium antibactérien MGO 400+. 250g.', de:'Premium antibakterieller Honig MGO 400+. 250g.' }
