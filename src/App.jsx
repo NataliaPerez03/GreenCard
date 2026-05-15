@@ -392,6 +392,13 @@ function Header({
 }
 
 function HomePage({ t, locale, currency, featuredProducts, onAddToCart, onNavigate }) {
+  const trustItems = [
+    { title: t('trust_organic'), description: t('trust_organic_desc') },
+    { title: t('trust_shipping'), description: t('trust_shipping_desc') },
+    { title: t('trust_support'), description: t('trust_support_desc') },
+    { title: t('trust_returns'), description: t('trust_returns_desc') }
+  ];
+
   return (
     <>
       <section className="hero">
@@ -430,21 +437,21 @@ function HomePage({ t, locale, currency, featuredProducts, onAddToCart, onNaviga
       </section>
 
       <section className="trust-bar">
-        <div className="trust-item">
-          <div className="trust-icon">🌱</div>
-          {t('trust_organic')}
+        <div className="trust-bar-header">
+          <p className="trust-kicker">{t('brand')}</p>
+          <h2>{t('trust_section_title')}</h2>
         </div>
-        <div className="trust-item">
-          <div className="trust-icon">🚚</div>
-          {t('trust_shipping')}
-        </div>
-        <div className="trust-item">
-          <div className="trust-icon">💬</div>
-          {t('trust_support')}
-        </div>
-        <div className="trust-item">
-          <div className="trust-icon">↩️</div>
-          {t('trust_returns')}
+
+        <div className="trust-grid">
+          {trustItems.map((item, index) => (
+            <article key={item.title} className="trust-item">
+              <span className="trust-index">{String(index + 1).padStart(2, '0')}</span>
+              <div className="trust-copy">
+                <h3 className="trust-item-title">{item.title}</h3>
+                <p className="trust-item-desc">{item.description}</p>
+              </div>
+            </article>
+          ))}
         </div>
       </section>
 
