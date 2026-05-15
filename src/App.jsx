@@ -1,4 +1,6 @@
 import { useDeferredValue, useEffect, useRef, useState } from 'react';
+import AuthPage from './AuthPage.jsx';
+import { getStoredSession, getStoredUsers, sanitizeUser, saveSession, saveUsers } from './auth.js';
 import { countries, paymentIcons, paymentNames } from './storeData.js';
 import { eventBus } from './eventBus.js';
 import { i18n } from './i18n.js';
@@ -15,7 +17,8 @@ const CATEGORY_KEYS = [
   ['care', 'cat_care']
 ];
 
-const VALID_PAGES = new Set(['home', 'products', 'cart', 'checkout', 'tracking']);
+const VALID_PAGES = new Set(['home', 'products', 'cart', 'checkout', 'tracking', 'auth']);
+const PROTECTED_PAGES = new Set(['products', 'cart', 'checkout']);
 
 function getPageFromHash() {
   const page = window.location.hash.replace('#', '') || 'home';
@@ -63,6 +66,10 @@ export default function App() {
   const [currentOrderId, setCurrentOrderId] = useState(null);
   const [, setOrderVersion] = useState(0);
   const [toasts, setToasts] = useState([]);
+  const [authMode, setAuthMode] = useState('login');
+  const [authRedirect, setAuthRedirect] = useState('products');
+  const [registeredUsers, setRegisteredUsers] = useState(() => getStoredUsers());
+  const [sessionUser, setSessionUser] = useState(() => getStoredSession());
 
   const country = getCountry(countryCode);
   const locale = country.locale;
@@ -75,10 +82,24 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    const syncPage = () => setCurrentPage(getPageFromHash());
+    const syncPage = () => {
+      const nextPage = getPageFromHash();
+      const hasActiveSession = Boolean(sessionUser || getStoredSession());
+      if (PROTECTED_PAGES.has(nextPage) && !hasActiveSession) {
+        setAuthMode('login');
+        setAuthRedirect(nextPage);
+        setCurrentPage('auth');
+        window.location.hash = 'auth';
+        return;
+      }
+
+      setCurrentPage(nextPage);
+    };
+
+    syncPage();
     window.addEventListener('hashchange', syncPage);
     return () => window.removeEventListener('hashchange', syncPage);
-  }, []);
+  }, [sessionUser]);
 
   useEffect(() => {
     const unsubscribers = [
@@ -126,10 +147,25 @@ export default function App() {
     ? orderService.getById(currentOrderId)
     : orderService.getAll().at(-1) || null;
 
-  function navigate(page) {
+  function navigate(page, options = {}) {
     const nextPage = VALID_PAGES.has(page) ? page : 'home';
+    if (PROTECTED_PAGES.has(nextPage) && !sessionUser && !options.bypassAuth) {
+      setAuthMode('login');
+      setAuthRedirect(nextPage);
+      setCurrentPage('auth');
+      window.location.hash = 'auth';
+      showToast(t('auth_required'), 'info');
+      return;
+    }
+
     setCurrentPage(nextPage);
     window.location.hash = nextPage;
+  }
+
+  function openAuth(mode = 'login', nextPage = 'products') {
+    setAuthMode(mode);
+    setAuthRedirect(nextPage);
+    navigate('auth', { bypassAuth: true });
   }
 
   function showToast(message, type = 'info') {
@@ -141,31 +177,128 @@ export default function App() {
     }, 3000);
   }
 
-  function addToCart(productId, quantity = 1) {
-    const product = productService.getById(productId);
-    if (!product || product.stock <= 0) {
-      showToast(t('stock_out'), 'error');
+  function isValidEmail(value) {
+    return /\S+@\S+\.\S+/.test(value);
+  }
+
+  function handleLogin(form) {
+    const email = form.email.trim().toLowerCase();
+    const password = form.password.trim();
+
+    if (!isValidEmail(email)) {
+      showToast(t('auth_invalid_email'), 'error');
       return;
     }
 
-    setCart((currentCart) => {
-      const existing = currentCart.find((item) => item.id === productId);
-      if (!existing) {
-        return [...currentCart, { id: productId, qty: Math.min(quantity, product.stock) }];
-      }
+    const matchedUser = registeredUsers.find(
+      (user) => user.email.toLowerCase() === email && user.password === password
+    );
 
-      const nextQuantity = Math.min(existing.qty + quantity, product.stock);
-      if (nextQuantity === existing.qty) {
-        showToast(`${t('stock_low')} (${product.stock})`, 'error');
-        return currentCart;
-      }
+    if (!matchedUser) {
+      showToast(t('auth_login_error'), 'error');
+      return;
+    }
 
-      return currentCart.map((item) =>
+    const safeUser = sanitizeUser(matchedUser);
+    setSessionUser(safeUser);
+    saveSession(safeUser);
+    showToast(t('auth_login_success'), 'success');
+    navigate(authRedirect || 'products', { bypassAuth: true });
+  }
+
+  function handleRegister(form) {
+    const name = form.name.trim();
+    const email = form.email.trim().toLowerCase();
+    const password = form.password.trim();
+    const confirmPassword = form.confirmPassword.trim();
+
+    if (!name || !isValidEmail(email)) {
+      showToast(t('auth_invalid_data'), 'error');
+      return;
+    }
+
+    if (password.length < 6) {
+      showToast(t('auth_password_short'), 'error');
+      return;
+    }
+
+    if (password !== confirmPassword) {
+      showToast(t('auth_password_mismatch'), 'error');
+      return;
+    }
+
+    if (registeredUsers.some((user) => user.email.toLowerCase() === email)) {
+      showToast(t('auth_user_exists'), 'error');
+      return;
+    }
+
+    const nextUser = {
+      id: `USR-${Date.now().toString(36).toUpperCase()}`,
+      name,
+      email,
+      password
+    };
+
+    const nextUsers = [...registeredUsers, nextUser];
+    setRegisteredUsers(nextUsers);
+    saveUsers(nextUsers);
+
+    const safeUser = sanitizeUser(nextUser);
+    setSessionUser(safeUser);
+    saveSession(safeUser);
+    showToast(t('auth_register_success'), 'success');
+    navigate(authRedirect || 'products', { bypassAuth: true });
+  }
+
+  function handleLogout() {
+    setSessionUser(null);
+    saveSession(null);
+    showToast(t('auth_logout_success'), 'info');
+
+    if (PROTECTED_PAGES.has(currentPage)) {
+      navigate('home', { bypassAuth: true });
+    }
+  }
+
+  function addToCart(productId, quantity = 1) {
+    if (!sessionUser) {
+      setAuthMode('login');
+      setAuthRedirect('products');
+      navigate('auth', { bypassAuth: true });
+      showToast(t('auth_required'), 'info');
+      return false;
+    }
+
+    const product = productService.getById(productId);
+    if (!product || product.stock <= 0) {
+      showToast(t('stock_out'), 'error');
+      return false;
+    }
+
+    const existing = cart.find((item) => item.id === productId);
+    if (!existing) {
+      setCart((currentCart) => [
+        ...currentCart,
+        { id: productId, qty: Math.min(quantity, product.stock) }
+      ]);
+      showToast(t('added'), 'success');
+      return true;
+    }
+
+    const nextQuantity = Math.min(existing.qty + quantity, product.stock);
+    if (nextQuantity === existing.qty) {
+      showToast(`${t('stock_low')} (${product.stock})`, 'error');
+      return false;
+    }
+
+    setCart((currentCart) =>
+      currentCart.map((item) =>
         item.id === productId ? { ...item, qty: nextQuantity } : item
-      );
-    });
+      )
+    );
 
     showToast(t('added'), 'success');
+    return true;
   }
 
   function removeFromCart(productId) {
@@ -224,9 +357,13 @@ export default function App() {
           countryCode={countryCode}
           cartCount={cartCount}
           currentPage={currentPage}
+          isAuthenticated={Boolean(sessionUser)}
           menuOpen={menuOpen}
+          userName={sessionUser?.name || ''}
           onCountryChange={handleCountryChange}
           onNavigate={navigate}
+          onOpenAuth={openAuth}
+          onLogout={handleLogout}
           onToggleMenu={() => setMenuOpen((open) => !open)}
         />
       </header>
@@ -238,6 +375,7 @@ export default function App() {
             locale={locale}
             currency={currency}
             featuredProducts={featuredProducts}
+            isAuthenticated={Boolean(sessionUser)}
             onAddToCart={addToCart}
             onNavigate={navigate}
           />
@@ -250,6 +388,7 @@ export default function App() {
             currency={currency}
             products={filteredProducts}
             categoryFilter={categoryFilter}
+            isAuthenticated={Boolean(sessionUser)}
             searchQuery={searchQuery}
             onCategoryChange={(category) => {
               setCategoryFilter(category);
@@ -262,6 +401,19 @@ export default function App() {
               }
             }}
             onAddToCart={addToCart}
+          />
+        )}
+
+        {currentPage === 'auth' && (
+          <AuthPage
+            t={t}
+            user={sessionUser}
+            mode={authMode}
+            redirectPage={authRedirect}
+            onModeChange={setAuthMode}
+            onLogin={handleLogin}
+            onRegister={handleRegister}
+            onNavigate={navigate}
           />
         )}
 
@@ -286,6 +438,7 @@ export default function App() {
             currency={currency}
             items={cartItems}
             total={cartTotal}
+            user={sessionUser}
             onNavigate={navigate}
             onOrderPlaced={handleOrderPlaced}
             onToast={showToast}
@@ -314,9 +467,13 @@ function Header({
   countryCode,
   cartCount,
   currentPage,
+  isAuthenticated,
   menuOpen,
+  userName,
   onCountryChange,
   onNavigate,
+  onOpenAuth,
+  onLogout,
   onToggleMenu
 }) {
   const navItems = [
@@ -370,6 +527,32 @@ function Header({
           ))}
         </select>
 
+        {isAuthenticated ? (
+          <>
+            <div className="user-pill">{userName}</div>
+            <button className="btn btn-outline nav-auth-btn" type="button" onClick={onLogout}>
+              {t('nav_logout')}
+            </button>
+          </>
+        ) : (
+          <>
+            <button
+              className="btn btn-outline nav-auth-btn"
+              type="button"
+              onClick={() => onOpenAuth('login', 'products')}
+            >
+              {t('nav_login')}
+            </button>
+            <button
+              className="btn btn-primary nav-auth-btn"
+              type="button"
+              onClick={() => onOpenAuth('register', 'products')}
+            >
+              {t('nav_register')}
+            </button>
+          </>
+        )}
+
         <a
           href="#cart"
           className="cart-icon-btn"
@@ -391,7 +574,7 @@ function Header({
   );
 }
 
-function HomePage({ t, locale, currency, featuredProducts, onAddToCart, onNavigate }) {
+function HomePage({ t, locale, currency, featuredProducts, isAuthenticated, onAddToCart, onNavigate }) {
   const trustItems = [
     { title: t('trust_organic'), description: t('trust_organic_desc') },
     { title: t('trust_shipping'), description: t('trust_shipping_desc') },
@@ -470,6 +653,7 @@ function HomePage({ t, locale, currency, featuredProducts, onAddToCart, onNaviga
               t={t}
               locale={locale}
               currency={currency}
+              isAuthenticated={isAuthenticated}
               onAddToCart={onAddToCart}
             />
           ))}
@@ -495,6 +679,7 @@ function ProductsPage({
   currency,
   products,
   categoryFilter,
+  isAuthenticated,
   searchQuery,
   onCategoryChange,
   onSearchChange,
@@ -536,6 +721,7 @@ function ProductsPage({
               t={t}
               locale={locale}
               currency={currency}
+              isAuthenticated={isAuthenticated}
               onAddToCart={onAddToCart}
             />
           ))
@@ -547,7 +733,7 @@ function ProductsPage({
   );
 }
 
-function ProductCard({ product, t, locale, currency, onAddToCart }) {
+function ProductCard({ product, t, locale, currency, isAuthenticated, onAddToCart }) {
   const [didAdd, setDidAdd] = useState(false);
   const timeoutRef = useRef(null);
 
@@ -562,7 +748,11 @@ function ProductCard({ product, t, locale, currency, onAddToCart }) {
   const lowStock = product.stock > 0 && product.stock <= 5;
 
   function handleAdd() {
-    onAddToCart(product.id);
+    const added = onAddToCart(product.id);
+    if (!added) {
+      return;
+    }
+
     setDidAdd(true);
 
     if (timeoutRef.current) {
@@ -607,7 +797,7 @@ function ProductCard({ product, t, locale, currency, onAddToCart }) {
             disabled={product.stock === 0}
             onClick={handleAdd}
           >
-            {didAdd ? t('added') : t('add_cart')}
+            {didAdd ? t('added') : isAuthenticated ? t('add_cart') : t('auth_buy_cta')}
           </button>
         </div>
       </div>
@@ -680,11 +870,11 @@ function CartPage({ t, locale, currency, items, total, onNavigate, onRemove, onU
   );
 }
 
-function CheckoutPage({ t, locale, country, currency, items, total, onNavigate, onOrderPlaced, onToast }) {
+function CheckoutPage({ t, locale, country, currency, items, total, user, onNavigate, onOrderPlaced, onToast }) {
   const [step, setStep] = useState(1);
   const [shipping, setShipping] = useState({
-    name: '',
-    email: '',
+    name: user?.name || '',
+    email: user?.email || '',
     address: '',
     city: '',
     phone: ''
