@@ -2,6 +2,7 @@ import { useDeferredValue, useEffect, useRef, useState } from 'react';
 import { countries, paymentIcons, paymentNames } from './storeData.js';
 import { eventBus } from './eventBus.js';
 import { i18n } from './i18n.js';
+import { getProductPrice } from './pricing.js';
 import { orderService, productService, sagaOrchestrator, STATUS_KEYS } from './services.js';
 
 const CATEGORY_KEYS = [
@@ -114,7 +115,7 @@ export default function App() {
       return {
         ...product,
         qty: Math.min(entry.qty, product.stock),
-        price: product.prices[currency]
+        price: getProductPrice(product, currency)
       };
     })
     .filter(Boolean);
@@ -592,7 +593,7 @@ function ProductCard({ product, t, locale, currency, onAddToCart }) {
         </p>
 
         <div className="product-footer">
-          <span className="product-price">{formatPrice(locale, product.prices[currency], currency)}</span>
+          <span className="product-price">{formatPrice(locale, getProductPrice(product, currency), currency)}</span>
           <button
             type="button"
             className={`btn btn-primary btn-add-cart ${didAdd ? 'btn-success' : ''}`}
@@ -914,6 +915,7 @@ function FormField({ label, type = 'text', value, onChange }) {
 
 function TrackingPage({ t, locale, order, onTrackSearch }) {
   const [query, setQuery] = useState('');
+  const orderLocale = order ? getCountry(order.country).locale : locale;
 
   if (!order) {
     return (
@@ -961,14 +963,14 @@ function TrackingPage({ t, locale, order, onTrackSearch }) {
             <div key={item.id} className="order-item">
               <span className="order-item-name">
                 <img src={item.image} className="summary-thumb" alt="" />
-                {item.name[locale]} x{item.qty}
+                {item.name[orderLocale]} x{item.qty}
               </span>
-              <span>{formatPrice(locale, item.price * item.qty, order.currency)}</span>
+              <span>{formatPrice(orderLocale, item.price * item.qty, order.currency)}</span>
             </div>
           ))}
           <div className="order-item total">
             <strong>{t('cart_total')}</strong>
-            <strong>{formatPrice(locale, order.total, order.currency)}</strong>
+            <strong>{formatPrice(orderLocale, order.total, order.currency)}</strong>
           </div>
         </div>
       </div>

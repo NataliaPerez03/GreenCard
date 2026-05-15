@@ -14,10 +14,12 @@ export const i18n = {
   },
 
   formatCurrency(locale, amount, currency) {
+    const fractionDigits = currency === 'COP' ? 0 : 2;
     const options = {
       style: 'currency',
       currency,
-      minimumFractionDigits: currency === 'COP' ? 0 : 2
+      minimumFractionDigits: fractionDigits,
+      maximumFractionDigits: fractionDigits
     };
 
     try {
